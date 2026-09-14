@@ -35,7 +35,18 @@ resource "azurerm_storage_account" "state" {
   account_replication_type        = "LRS"
   min_tls_version                 = "TLS1_2"
   allow_nested_items_to_be_public = false
-  shared_access_key_enabled       = false # força autenticação via Azure AD, nunca chave estática
+
+  # FASE 1 DE 2 -- veja a variável logo abaixo antes de mudar isto direto.
+  # O provider, ao terminar de criar o storage account, faz um "ping" no
+  # serviço de Blob pra confirmar que já está disponível. Com a chave
+  # desligada, esse ping também exige uma identidade do Azure AD
+  # autorizada -- mas a role que autoriza isso (mais abaixo neste arquivo)
+  # só pode ser criada DEPOIS que o storage account existir, porque ela
+  # referencia o ID dele. Ligar a chave só nesta primeira aplicação evita
+  # esse ciclo: o ping passa por chave, a role se propaga, e depois
+  # desligamos a chave de vez numa segunda aplicação (que é só um update,
+  # não uma recriação -- não dispara esse ping de novo).
+  shared_access_key_enabled = var.allow_shared_access_key_bootstrap
 
   blob_properties {
     versioning_enabled = true
@@ -84,6 +95,29 @@ resource "azurerm_role_assignment" "bootstrap_runner_state_queue" {
 # existe segredo.
 # ---------------------------------------------------------------------------
 
+locals {
+  github_owner     = split("/", var.github_repository)[0]
+  github_repo_name = split("/", var.github_repository)[1]
+
+  # O "subject" (claim `sub`) que o GitHub coloca no token OIDC NÃO é
+  # simplesmente "repo:<owner>/<repo>". Ele embute os IDs numéricos
+  # imutáveis da conta e do repositório:
+  #
+  #   repo:Pmacoy@42946356/azure-platform-engineering@1370531818:ref:refs/heads/main
+  #
+  # Por que o GitHub faz isso: nomes de conta e de repositório podem ser
+  # renomeados, deletados e re-registrados por OUTRA pessoa. Se a confiança
+  # no Azure fosse ancorada só no texto "Pmacoy/azure-platform-engineering",
+  # quem conseguisse registrar esse nome depois de você abandoná-lo herdaria
+  # o acesso à sua subscription. Os IDs numéricos nunca são reaproveitados,
+  # então ancorar neles fecha esse buraco.
+  #
+  # Consequência prática: o subject é comparado pelo Azure AD como string
+  # exata e case-sensitive, então ele tem que ser montado exatamente neste
+  # formato -- inclusive a capitalização do login (Pmacoy, não pmacoy).
+  github_oidc_subject_prefix = "repo:${local.github_owner}@${var.github_owner_id}/${local.github_repo_name}@${var.github_repository_id}"
+}
+
 resource "azuread_application" "github_actions" {
   display_name = "${var.prefix}-github-actions-oidc"
 }
@@ -100,7 +134,7 @@ resource "azuread_application_federated_identity_credential" "pull_request" {
   display_name   = "github-actions-pull-request"
   audiences      = ["api://AzureADTokenExchange"]
   issuer         = "https://token.actions.githubusercontent.com"
-  subject        = "repo:${var.github_repository}:pull_request"
+  subject        = "${local.github_oidc_subject_prefix}:pull_request"
 }
 
 # Credencial usada pelo job de "apply": confia especificamente no GitHub
@@ -112,7 +146,23 @@ resource "azuread_application_federated_identity_credential" "gated_environment"
   display_name   = "github-actions-environment-${var.github_environment}"
   audiences      = ["api://AzureADTokenExchange"]
   issuer         = "https://token.actions.githubusercontent.com"
-  subject        = "repo:${var.github_repository}:environment:${var.github_environment}"
+  subject        = "${local.github_oidc_subject_prefix}:environment:${var.github_environment}"
+}
+
+# Credencial usada pelo job de "plan" quando ele dispara por um PUSH direto
+# na main (não por pull request) -- é o caso do workflow deste projeto, já
+# que o job de apply depende do plan ter rodado no MESMO push. Fora de um
+# Environment e fora de um pull_request, o token OIDC que o GitHub emite
+# tem um terceiro formato de subject: "repo:<owner>/<repo>:ref:refs/heads/
+# <branch>". Sem esta credencial, só a branch "main" (a única com proteção
+# de branch/push direto neste projeto) consegue autenticar assim -- outras
+# branches continuam sem acesso nenhum fora de PR ou do Environment gated.
+resource "azuread_application_federated_identity_credential" "main_branch_push" {
+  application_id = azuread_application.github_actions.id
+  display_name   = "github-actions-push-main"
+  audiences      = ["api://AzureADTokenExchange"]
+  issuer         = "https://token.actions.githubusercontent.com"
+  subject        = "${local.github_oidc_subject_prefix}:ref:refs/heads/main"
 }
 
 # ---------------------------------------------------------------------------

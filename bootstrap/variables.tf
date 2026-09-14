@@ -11,9 +11,30 @@ variable "location" {
 }
 
 variable "github_repository" {
-  description = "Repositório GitHub no formato 'owner/repo' que terá permissão de assumir a identidade via OIDC."
+  description = "Repositório GitHub no formato 'owner/repo' que terá permissão de assumir a identidade via OIDC. Case-sensitive: precisa bater exatamente com o login registrado no GitHub."
   type        = string
-  default     = "pmacoy/azure-platform-engineering"
+  default     = "Pmacoy/azure-platform-engineering"
+}
+
+# Os dois IDs abaixo são numéricos e IMUTÁVEIS: o GitHub os embute no
+# subject do token OIDC (veja o comentário do local.github_oidc_subject_prefix
+# em main.tf). Onde achar esses números, se precisar conferir:
+#
+#   1. Na própria mensagem de erro AADSTS700213, que cita o subject
+#      apresentado -- foi daí que estes vieram.
+#   2. gh api repos/<owner>/<repo> --jq '{repo: .id, owner: .owner.id}'
+#   3. https://api.github.com/repos/<owner>/<repo> no navegador (campos
+#      "id" na raiz e "owner.id").
+variable "github_owner_id" {
+  description = "ID numérico imutável da conta/organização dona do repositório no GitHub."
+  type        = string
+  default     = "42946356"
+}
+
+variable "github_repository_id" {
+  description = "ID numérico imutável do repositório no GitHub."
+  type        = string
+  default     = "1370531818"
 }
 
 variable "github_environment" {

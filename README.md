@@ -78,19 +78,66 @@ guardado. A cada execução do workflow, o GitHub emite um token JWT de
 curtíssima duração, assinado por ele mesmo, dizendo "eu sou a execução X
 do repositório Y, disparada por este evento". O Azure AD tem uma
 **federated identity credential** que diz "eu confio em tokens assinados
-pelo GitHub que afirmem ser exatamente `repo:pmacoy/azure-platform-
-engineering:pull_request`" (ou `:environment:production`, no caso do
-apply). Se o token bater com essa condição, o Azure AD troca ele por um
-access token de verdade, válido por pouco tempo. Não há nada para vazar
-porque não há nada de longa duração para vazar.
+pelo GitHub que afirmem ser exatamente este repositório, neste contexto".
+Se o token bater com essa condição, o Azure AD troca ele por um access
+token de verdade, válido por pouco tempo. Não há nada para vazar porque
+não há nada de longa duração para vazar.
 
-Repare que este projeto usa **duas** federated credentials com escopos
-diferentes: uma para qualquer pull request (usada só pelo job de `plan`,
-que nunca muda nada) e outra específica para o GitHub Environment
-`production` (usada só pelo job de `apply`, e só depois de alguém aprovar
-manualmente). Isso é mais estrito do que confiar só na branch `main`: um
-push direto na `main` sem passar por aprovação de Environment não teria
-como assumir essa segunda identidade.
+### O formato do `subject` (onde este projeto sangrou)
+
+O `subject` (claim `sub`) que o GitHub emite **não** é o óbvio
+`repo:owner/repo:contexto`. Ele embute IDs numéricos imutáveis:
+
+```
+repo:Pmacoy@42946356/azure-platform-engineering@1370531818:ref:refs/heads/main
+     └─ login ─┘ └ ID da conta ┘ └── nome do repo ──┘ └ ID do repo ┘
+```
+
+O motivo é defensivo: nomes de conta e de repositório podem ser
+renomeados, deletados e re-registrados por outra pessoa. Se a confiança
+no Azure estivesse ancorada só no texto `Pmacoy/azure-platform-engineering`,
+quem registrasse esse nome depois de você abandoná-lo herdaria acesso à
+sua subscription. IDs numéricos nunca são reaproveitados, então ancorar
+neles fecha esse buraco.
+
+Duas armadilhas que derrubaram o primeiro push deste projeto, ambas com a
+**mesma** mensagem de erro genérica (`AADSTS700213`):
+
+1. **Capitalização.** O Azure AD compara o subject como string exata e
+   case-sensitive. `pmacoy` ≠ `Pmacoy`, mesmo que URLs do GitHub
+   funcionem em qualquer caixa.
+2. **Os IDs numéricos.** Cadastrar `repo:Pmacoy/azure-platform-engineering:...`
+   (o formato que aparece na maioria dos tutoriais antigos) nunca vai
+   casar com o que o GitHub realmente envia hoje.
+
+O jeito de diagnosticar os dois é o mesmo, e é o que vale levar pra
+entrevista: **a mensagem de erro do Azure cita o subject apresentado**.
+Compare ele caractere a caractere com o que está cadastrado, em vez de
+sair procurando problema de permissão.
+
+Repare que este projeto usa **três** federated credentials com escopos
+diferentes:
+
+1. Qualquer pull request (`...:pull_request`) — usada só pelo job de
+   `plan` quando ele roda a partir de uma PR. Só dá plan, nunca apply.
+2. O GitHub Environment `production` (`...:environment:production`) —
+   usada só pelo job de `apply`, e só depois de alguém aprovar
+   manualmente.
+3. Push direto na branch `main` (`...:ref:refs/heads/main`) — usada pelo
+   job de `plan` quando ele roda a partir de um push direto (sem PR), que
+   é exatamente o que acontece aqui, já que o `apply` depende do `plan`
+   ter rodado no mesmo push. Sem esta terceira credencial, um push direto
+   na main não consegue autenticar nem pra fazer plan.
+
+O prefixo das três (`repo:<owner>@<id>/<repo>@<id>`) é montado uma vez só,
+em `local.github_oidc_subject_prefix` no `bootstrap/main.tf` — se um dia
+os IDs mudarem (repositório transferido de conta, por exemplo), é um lugar
+só para corrigir, não três.
+
+Cada uma dessas é mais estrita do que confiar em "qualquer coisa deste
+repositório": uma PR aberta por qualquer pessoa só consegue plan; só um
+push que já está na `main` consegue disparar um plan que vira apply; e o
+apply em si só roda depois de aprovação manual do Environment.
 
 **Pergunta de entrevista que isso responde:** *"Como o seu pipeline se
 autentica no provedor de nuvem sem guardar uma senha?"* — e também *"como

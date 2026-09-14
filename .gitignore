@@ -1,0 +1,26 @@
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# O bootstrap roda com estado local de propósito (veja bootstrap/versions.tf)
+# -- o tfstate dele nunca deve ir pro Git, mesmo sem o padrão *.tfstate acima
+# cobrir algum caso futuro.
+bootstrap/*.tfstate
+bootstrap/*.tfstate.backup
+bootstrap/backend.hcl
+
+environments/**/backend.hcl
+
+# Sistema operacional / editor
+.DS_Store
+*.swp

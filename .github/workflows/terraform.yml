@@ -1,0 +1,132 @@
+name: Terraform
+
+on:
+    pull_request:
+        branches: [main]
+        paths:
+            - "environments/dev/**"
+            - "modules/**"
+            - ".github/workflows/terraform.yml"
+    push:
+        branches: [main]
+        paths:
+            - "environments/dev/**"
+            - "modules/**"
+            - ".github/workflows/terraform.yml"
+    workflow_dispatch:
+
+permissions:
+    id-token: write # obrigatório: é isso que deixa o GitHub emitir o token OIDC
+    contents: read
+
+# Evita dois applies simultâneos pisando no mesmo state -- um push na main
+# enquanto um apply anterior ainda roda espera na fila em vez de correr em
+# paralelo.
+concurrency:
+    group: terraform-dev
+    cancel-in-progress: false
+
+env:
+    TF_VERSION: "1.9.8"
+    # Nenhum destes é um secret de longa duração: ARM_USE_OIDC=true diz ao
+    # provider azurerm para trocar o token OIDC que o GitHub injeta em tempo
+    # de execução (via ACTIONS_ID_TOKEN_REQUEST_TOKEN/URL, automático quando
+    # `permissions.id-token: write` está setado acima) por um access token do
+    # Azure AD de curta duração. Client ID/tenant/subscription são
+    # identificadores públicos, não segredos -- podiam vazar sem problema.
+    ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+    ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+    ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+    ARM_USE_OIDC: "true"
+
+jobs:
+    plan:
+        name: Plan
+        runs-on: ubuntu-latest
+        defaults:
+            run:
+                working-directory: environments/dev
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Setup Terraform
+              uses: hashicorp/setup-terraform@v3
+              with:
+                  terraform_version: ${{ env.TF_VERSION }}
+
+            - name: terraform fmt -check
+              run: terraform fmt -check -recursive -diff ../..
+
+            - name: terraform init
+              run: |
+                  terraform init \
+                    -backend-config="resource_group_name=${{ secrets.TF_STATE_RG }}" \
+                    -backend-config="storage_account_name=${{ secrets.TF_STATE_SA }}" \
+                    -backend-config="container_name=tfstate" \
+                    -backend-config="key=dev/landing-zone.tfstate"
+
+            - name: terraform validate
+              run: terraform validate
+
+            - name: terraform plan
+              run: terraform plan -input=false -no-color -out=tfplan
+
+            - name: Publicar plano no resumo do job
+              if: always()
+              run: |
+                  echo "## Terraform Plan — dev" >> "$GITHUB_STEP_SUMMARY"
+                  echo '```' >> "$GITHUB_STEP_SUMMARY"
+                  terraform show -no-color tfplan >> "$GITHUB_STEP_SUMMARY" || true
+                  echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+            # Só sobe o plano assinado quando o evento é um push na main -- o job
+            # de apply só existe para esse caso. Numa PR, o resumo acima já é o
+            # suficiente para revisar.
+            - name: Upload do plano
+              if: github.event_name == 'push'
+              uses: actions/upload-artifact@v4
+              with:
+                  name: tfplan-dev
+                  path: environments/dev/tfplan
+                  retention-days: 1
+
+    apply:
+        name: Apply (gated)
+        needs: plan
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        runs-on: ubuntu-latest
+        # Este nome precisa bater exatamente com var.github_environment no
+        # bootstrap (é o que a federated credential confia) E com um GitHub
+        # Environment de verdade, criado em Settings → Environments, com um
+        # required reviewer configurado -- é isso que faz o job parar e
+        # esperar aprovação manual antes de tocar no Azure de verdade.
+        environment: production
+        defaults:
+            run:
+                working-directory: environments/dev
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Setup Terraform
+              uses: hashicorp/setup-terraform@v3
+              with:
+                  terraform_version: ${{ env.TF_VERSION }}
+
+            - name: terraform init
+              run: |
+                  terraform init \
+                    -backend-config="resource_group_name=${{ secrets.TF_STATE_RG }}" \
+                    -backend-config="storage_account_name=${{ secrets.TF_STATE_SA }}" \
+                    -backend-config="container_name=tfstate" \
+                    -backend-config="key=dev/landing-zone.tfstate"
+
+            - name: Download do plano
+              uses: actions/download-artifact@v4
+              with:
+                  name: tfplan-dev
+                  path: environments/dev
+
+            - name: terraform apply
+              run: terraform apply -input=false -auto-approve tfplan

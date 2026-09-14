@@ -17,3 +17,16 @@ output "log_analytics_workspace_id" {
 output "key_vault_uri" {
   value = module.landing_zone.key_vault_uri
 }
+
+output "aks_cluster_name" {
+  value = module.aks.cluster_name
+}
+
+output "aks_node_resource_group" {
+  description = "Resource group gerenciado pelo AKS -- onde as VMs e discos cobrados aparecem."
+  value       = module.aks.node_resource_group
+}
+
+output "acr_login_server" {
+  value = module.aks.acr_login_server
+}

@@ -26,16 +26,22 @@ bootstrap/              ← roda 1x, local, manualmente por você
            + App Registration com federated credential (identidade OIDC)
            + role assignments dessa identidade
 
-modules/landing-zone/   ← módulo reutilizável
+modules/landing-zone/   ← módulo reutilizável (M1)
   └─ resource group + VNet (sub-rede pública/privada + NSGs)
            + Log Analytics Workspace + Key Vault
 
-environments/dev/       ← instancia o módulo acima, com backend remoto
+modules/aks/            ← módulo reutilizável (M2)
+  └─ AKS (nós na sub-rede privada, CNI overlay, Container Insights
+           no workspace do M1) + ACR + role AcrPull
+
+environments/dev/       ← instancia os módulos acima, com backend remoto
   └─ é isto que o GitHub Actions roda a cada PR/push
 
 .github/workflows/
   terraform.yml         ← plan em toda PR, apply gated (aprovação manual)
                            só em push na main
+  destroy.yml           ← destruição manual, com confirmação digitada +
+                           o mesmo Environment gated
 ```
 
 ## Por que existe um `bootstrap/` separado
@@ -174,6 +180,17 @@ certo.
   (criar/configurar o recurso via Terraform, que é uma chamada ao Azure
   Resource Manager, não ao Key Vault em si). Isso é esperado agora; a
   Fase 06 vai conectar uma rota real quando isso importar.
+- **`ignore_changes = [tags]` no storage account de estado** — uma Azure
+  Policy com efeito `modify`, herdada na assinatura, aplica tags neste
+  recurso por fora do Terraform. Como elas não estavam declaradas no
+  código, todo plano propunha removê-las, a policy recolocava, e o plano
+  seguinte propunha remover de novo — uma disputa infinita que também
+  fazia o `apply` nunca terminar limpo. `ignore_changes` declara "as tags
+  deste recurso não são minhas": é como se convive com governança
+  imperativa num mundo declarativo, cedendo a propriedade do campo a quem
+  de fato o governa. Declarar as tags no código seria a alternativa, mas
+  quebraria toda vez que a policy mudasse — e a policy pertence a quem
+  governa a assinatura, não a este repositório.
 - **Contributor na assinatura inteira para a identidade do GitHub
   Actions** — deliberadamente amplo demais para uma plataforma madura, e
   documentado assim de propósito no próprio `bootstrap/main.tf`. É o
@@ -283,11 +300,81 @@ ser diferente — prováveis suspeitos, na ordem mais provável:
 Cole o log real do job que falhar e resolvemos como sempre: causa raiz
 antes de correção, correção verificada no próximo push real.
 
+## M2: AKS + ACR
+
+O cluster não recria nada que o M1 já fez: ele entra na **sub-rede privada
+da landing zone** e manda métrica e log para o **workspace do Log Analytics
+da landing zone**. Esse encaixe é o argumento prático de por que a landing
+zone existe como camada separada.
+
+### Antes do primeiro apply do M2
+
+O bootstrap precisa rodar de novo, localmente, **uma vez**, para dar à
+identidade do pipeline a permissão de criar role assignments (o porquê
+está logo abaixo). Sem isso o apply cria o cluster inteiro e só então
+falha com `AuthorizationFailed`:
+
+```bash
+cd bootstrap
+terraform apply    # 1 to add: github_actions_rbac_admin
+```
+
+### Decisões que valem explicar
+
+- **`admin_enabled = false` no ACR.** O registry pode gerar usuário e senha
+  estáticos para você colar num `imagePullSecret`. Em vez disso, a
+  identidade do kubelet recebe a role `AcrPull` — o mesmo princípio de
+  "sem segredo de longa duração" que o M1 aplicou no login do pipeline.
+  Repare que a identidade do *kubelet* é diferente da identidade do
+  *cluster*: a do cluster cria load balancer e disco; a do kubelet puxa
+  imagem. É a do kubelet que precisa de `AcrPull`.
+- **Contributor não bastava.** O papel Contributor tem
+  `Microsoft.Authorization/*/Write` nos `NotActions` — ele cria qualquer
+  recurso, mas nenhum role assignment. Como o M2 precisa criar a role
+  `AcrPull`, a identidade do pipeline ganhou também
+  `Role Based Access Control Administrator` no bootstrap. Isso está
+  amplo demais de propósito (escopo de assinatura, sem condição ABAC) e
+  apertar é trabalho do M5.
+- **Azure CNI em modo overlay.** No CNI clássico, cada pod consome um IP
+  da sub-rede da VNet — uma `/24` como a nossa esgotaria com poucas dezenas
+  de pods. No overlay, os pods usam um espaço próprio (`pod_cidr`) e só os
+  nós consomem IP da sub-rede. É o que permite a landing zone ter
+  sub-redes pequenas sem pintar o projeto num canto.
+- **`temporary_name_for_rotation` no pool padrão.** Sem isso, mudar o
+  `vm_size` do pool de sistema força a destruição e recriação do cluster
+  inteiro. Com isso, o provider cria um pool temporário, move as cargas,
+  recria o definitivo no tamanho novo e remove o temporário. Importa
+  concretamente aqui: o M4 (Backstage) provavelmente vai exigir subir de
+  `Standard_B2s` para `Standard_B2ms`.
+- **`sku_tier = "Free"` e 1 nó.** Control plane sem custo e sem SLA, um
+  único nó, sem alta disponibilidade. É uma escolha de custo consciente
+  para um ambiente de estudo, não um descuido — e saber o que o tier
+  Standard compra (SLA financeiro) é parte da resposta.
+- **`kube_config` não é output.** Ele contém credencial de acesso total ao
+  cluster; exportar como output faria esse segredo aparecer em
+  `terraform output` e no resumo de qualquer job. O acesso certo é
+  `az aks get-credentials`, que emite credencial por usuário via Azure AD.
+
+### Controlando o custo
+
+O que custa dinheiro aqui são as VMs dos nós e seus discos, que vivem no
+resource group gerenciado pelo AKS (veja o output `aks_node_resource_group`).
+Para o dia a dia, parar o cluster é melhor que destruí-lo:
+
+```bash
+az aks stop  --name azpe-dev-aks --resource-group azpe-dev-rg
+az aks start --name azpe-dev-aks --resource-group azpe-dev-rg
+```
+
+`stop` desliga as VMs em ~2 minutos e preserva tudo que estiver instalado
+dentro do cluster. O workflow `destroy.yml` existe para zerar de verdade —
+com confirmação digitada e aprovação do Environment, porque destruir nunca
+deveria ser um caminho que alguém percorre por acidente.
+
 ## Próximos milestones
 
 | # | Escopo |
 |---|--------|
-| M2 | AKS + Azure Container Registry via módulo reutilizável |
 | M3 | GitOps com Argo CD + pipeline reutilizável publicando no ACR |
 | M4 | Golden path no Backstage ("criar nova API") |
 | M5 | Guardrails — Crossplane Composition + Azure Policy |

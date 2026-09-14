@@ -51,6 +51,25 @@ resource "azurerm_storage_account" "state" {
   blob_properties {
     versioning_enabled = true
   }
+
+  # Alguma coisa fora do Terraform aplica tags neste recurso -- quase
+  # certamente uma Azure Policy com efeito `modify` herdada na assinatura
+  # ou no management group (a tag "Empresa" é o indício). Como elas não
+  # estão declaradas aqui, todo plano propunha removê-las, a policy as
+  # recolocava, e o plano seguinte propunha remover de novo: uma disputa
+  # que o Terraform não tem como vencer.
+  #
+  # ignore_changes = [tags] declara explicitamente "as tags deste recurso
+  # não são minhas". É a forma correta de conviver com governança
+  # imperativa (policy) num mundo declarativo: você não finge que a policy
+  # não existe, você cede a propriedade daquele campo a ela.
+  #
+  # A alternativa seria declarar as tags aqui para coincidir com a policy,
+  # mas isso quebra sempre que a policy mudar -- e a policy pertence a
+  # quem governa a assinatura, não a este repositório.
+  lifecycle {
+    ignore_changes = [tags]
+  }
 }
 
 resource "azurerm_storage_container" "tfstate" {
@@ -185,5 +204,31 @@ resource "azurerm_role_assignment" "github_actions_contributor" {
 resource "azurerm_role_assignment" "github_actions_state_blob" {
   scope                = azurerm_storage_account.state.id
   role_definition_name = "Storage Blob Data Contributor"
+  principal_id         = azuread_service_principal.github_actions.object_id
+}
+
+# Por que Contributor não basta (M2 em diante):
+#
+# O papel Contributor tem "Microsoft.Authorization/*/Write" na lista de
+# NotActions -- ou seja, ele pode criar QUALQUER recurso, mas não pode
+# criar role assignment nenhum. Isso é proposital no Azure: quem pode
+# distribuir permissões pode escalar privilégio até Owner, então essa
+# capacidade é separada de "poder criar coisas".
+#
+# O M2 precisa disso porque o cluster AKS recebe a role "AcrPull" no
+# Container Registry (é assim que o kubelet puxa imagem sem usuário e
+# senha guardados num image pull secret). Sem a permissão abaixo, o apply
+# cria o cluster inteiro e só então falha com "AuthorizationFailed".
+#
+# "Role Based Access Control Administrator" é a escolha moderna e mais
+# estreita que "User Access Administrator": ela permite gerenciar role
+# assignments e nada mais, e aceita condições ABAC limitando QUAIS roles
+# podem ser atribuídas. Aqui ela vai sem condição e no escopo da
+# assinatura inteira -- amplo demais, pelo mesmo motivo documentado no
+# Contributor acima, e apertar isso (condição ABAC deixando só AcrPull,
+# escopo por resource group) é trabalho explícito do M5.
+resource "azurerm_role_assignment" "github_actions_rbac_admin" {
+  scope                = data.azurerm_subscription.current.id
+  role_definition_name = "Role Based Access Control Administrator"
   principal_id         = azuread_service_principal.github_actions.object_id
 }

@@ -25,4 +25,4 @@ resources:
 images:
 - name: demo-api
   newName: azpedevacr93mi2y.azurecr.io/demo-api
-  newTag: sha-d44859c
+  newTag: sha-50ea9ea

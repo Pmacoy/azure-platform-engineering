@@ -1,0 +1,71 @@
+# Instalação enxuta do Argo CD.
+#
+# O chart padrão sobe sete componentes. Num nó Standard_B2ms, com o
+# kube-system e o agente do Container Insights já consumindo memória, subir
+# tudo deixa o cluster no limite -- e um cluster no limite falha de formas
+# confusas (pod em Pending sem explicação óbvia, OOMKill intermitente). O que
+# está desligado aqui está desligado por não ser usado ainda, não por
+# economia cega: cada item volta quando houver motivo.
+#
+# Este arquivo é lido DUAS vezes, e isso é proposital:
+#   1. Pelo `helm install` manual da primeira vez (o cluster ainda não tem
+#      Argo CD, então alguém precisa instalá-lo).
+#   2. Pelo próprio Argo CD depois, via gitops/apps/argocd.yaml, que aponta
+#      para este mesmo caminho no Git. A partir daí, mudar este arquivo e
+#      fazer commit é como se reconfigura o Argo CD -- inclusive ligando de
+#      volta o que está desligado abaixo.
+
+# SSO. Sem provedor de identidade configurado, o Dex só consome memória.
+dex:
+  enabled: false
+
+# Notificações para Slack/Teams/e-mail. Não há canal configurado ainda.
+notifications:
+  enabled: false
+
+# ApplicationSet gera Applications a partir de geradores (lista de clusters,
+# diretórios do Git, PRs). Com uma aplicação só, o app-of-apps simples resolve.
+# Este é o componente que o M4 (golden path) provavelmente vai religar.
+applicationSet:
+  enabled: false
+
+configs:
+  params:
+    # Desliga o TLS do servidor do Argo. Isso é aceitável AQUI porque o acesso
+    # é exclusivamente por `kubectl port-forward` -- o tráfego nunca sai do
+    # túnel autenticado do kubectl. No momento em que existir um ingress
+    # exposto (M4), isto tem que voltar a "false" e o TLS passa a ser
+    # terminado no ingress.
+    server.insecure: true
+
+controller:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+
+repoServer:
+  resources:
+    requests:
+      cpu: 20m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+
+server:
+  resources:
+    requests:
+      cpu: 20m
+      memory: 64Mi
+    limits:
+      memory: 128Mi
+
+redis:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+    limits:
+      memory: 128Mi

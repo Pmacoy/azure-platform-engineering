@@ -89,6 +89,12 @@ variable "network_policy" {
   default     = null
 }
 
+variable "ci_principal_object_id" {
+  description = "Object ID do service principal do pipeline, que recebe AcrPush no registry. null não cria a atribuição."
+  type        = string
+  default     = null
+}
+
 variable "tags" {
   description = "Tags aplicadas a todos os recursos deste módulo."
   type        = map(string)

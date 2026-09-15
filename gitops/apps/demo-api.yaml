@@ -1,0 +1,44 @@
+# A aplicação de exemplo. Repare no que ESTE arquivo não contém: nenhuma tag
+# de imagem, nenhum endereço de registry, nenhuma configuração de deploy. Ele
+# só diz "sincronize o que estiver em gitops/manifests/demo-api".
+#
+# Essa separação é o que faz o pipeline de build não precisar de credencial
+# do cluster: ele altera um arquivo no Git e vai embora. Quem fala com o
+# cluster é o Argo CD, de dentro dele, puxando -- nunca o CI empurrando.
+# É a diferença entre "push-based" e "pull-based" deployment, e o argumento
+# de segurança é direto: um CI comprometido não tem como aplicar nada no
+# cluster, porque ele não tem acesso ao cluster.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: demo-api
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/Pmacoy/azure-platform-engineering.git
+    targetRevision: main
+    path: gitops/manifests/demo-api
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: demo
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      # O namespace "demo" é declarado em namespace.yaml, mas o Argo precisa
+      # que ele exista antes de aplicar o Deployment nele. Esta opção resolve
+      # a ordem sem precisar de sync waves.
+      - CreateNamespace=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 2m

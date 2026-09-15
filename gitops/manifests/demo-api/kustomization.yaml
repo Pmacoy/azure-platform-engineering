@@ -1,0 +1,28 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - deployment.yaml
+  - service.yaml
+
+# ESTE BLOCO É A JUNTA ENTRE O PIPELINE E O GITOPS.
+#
+# O deployment.yaml referencia a imagem só como "demo-api"; é aqui que esse
+# nome vira o endereço real com a tag do commit. O pipeline de build roda
+# `kustomize edit set image` neste arquivo e faz commit da mudança -- e é esse
+# commit, não o build, que dispara o deploy.
+#
+# Por que isso importa: o estado desejado do cluster está no Git, sempre.
+# `git log gitops/manifests/demo-api/kustomization.yaml` responde "o que
+# estava rodando em produção no dia X" sem consultar o cluster, e reverter um
+# deploy é `git revert` -- não um comando imperativo que alguém precisa
+# lembrar de rodar.
+#
+# O endereço do registry está fixo aqui porque o Terraform o gerou com um
+# sufixo aleatório (nomes de ACR são únicos globalmente). É o ponto de
+# contato inevitável entre a camada que provisiona e a camada que declara.
+images:
+  - name: demo-api
+    newName: azpedevacr93mi2y.azurecr.io/demo-api
+    newTag: "placeholder"

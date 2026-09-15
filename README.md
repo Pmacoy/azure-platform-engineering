@@ -6,10 +6,10 @@ onde um desenvolvedor pede "nova API" no Backstage e a plataforma cuida de
 repositório, infraestrutura, CI/CD, deploy, observabilidade e segurança —
 sem ele precisar entender o que tem por baixo.
 
-Este README documenta o **Milestone 1: landing zone** — a base de rede,
-identidade e segredo sobre a qual todo o resto (AKS, GitOps, Backstage,
-Crossplane) vai se apoiar. Ele é longo de propósito: a ideia não é só você
-rodar os comandos, é você conseguir explicar cada decisão numa entrevista.
+Este README documenta os milestones concluídos — **M1: landing zone**,
+**M2: AKS + ACR** e **M3: GitOps com Argo CD**. Ele é longo de propósito: a
+ideia não é só você rodar os comandos, é você conseguir explicar cada decisão
+numa entrevista, inclusive as que deram errado primeiro.
 
 ## A regra de sempre
 
@@ -37,9 +37,19 @@ modules/aks/            ← módulo reutilizável (M2)
 environments/dev/       ← instancia os módulos acima, com backend remoto
   └─ é isto que o GitHub Actions roda a cada PR/push
 
+apps/demo-api/          ← aplicação de exemplo (M3)
+  └─ Go + Dockerfile multi-estágio, imagem distroless
+
+gitops/                 ← estado desejado do cluster, versionado (M3)
+  ├─ bootstrap/         ← helm values do Argo CD + app-of-apps raiz
+  ├─ apps/              ← uma Application do Argo por aplicação
+  └─ manifests/         ← manifestos Kubernetes que o Argo sincroniza
+
 .github/workflows/
   terraform.yml         ← plan em toda PR, apply gated (aprovação manual)
                            só em push na main
+  build.yml             ← build da imagem, push no ACR e commit da nova tag
+                           em gitops/ (o que dispara o deploy)
   destroy.yml           ← destruição manual, com confirmação digitada +
                            o mesmo Environment gated
 ```
@@ -371,11 +381,146 @@ dentro do cluster. O workflow `destroy.yml` existe para zerar de verdade —
 com confirmação digitada e aprovação do Environment, porque destruir nunca
 deveria ser um caminho que alguém percorre por acidente.
 
+## M3: GitOps com Argo CD
+
+```
+você faz push em apps/demo-api/
+        │
+        ▼
+build.yml ── constrói a imagem ──▶ ACR (tag = sha do commit)
+        │
+        └── edita gitops/manifests/demo-api/kustomization.yaml
+            e faz commit da nova tag
+                    │
+                    ▼
+              Argo CD (dentro do cluster) percebe o commit
+                    │
+                    ▼
+              aplica no cluster
+```
+
+### A decisão central: pull, não push
+
+O pipeline **nunca fala com o cluster**. Ele constrói a imagem, empurra para o
+registry, altera um arquivo no Git e termina. Quem aplica é o Argo CD, de
+dentro do cluster, puxando o estado desejado do repositório.
+
+A consequência prática é de segurança: o CI não tem — e não precisa ter —
+nenhuma credencial do Kubernetes. Um pipeline comprometido pode empurrar uma
+imagem ruim, mas não consegue aplicar nada diretamente no cluster, nem ler
+segredos dele, nem escalar privilégio a partir dali. No modelo tradicional
+(*push-based*, o `kubectl apply` no final do pipeline), o CI precisa de um
+kubeconfig com permissão ampla, e esse kubeconfig vira o elo mais fraco.
+
+**Pergunta de entrevista que isso responde:** *"qual a diferença prática entre
+CI/CD tradicional e GitOps?"*
+
+### O laço infinito que não acontece
+
+Este pipeline termina fazendo commit no próprio repositório que o dispara —
+a receita clássica de recursão infinita. A solução aqui não é o `[skip ci]` na
+mensagem de commit (frágil, e fácil de alguém remover sem entender): é a
+separação de caminhos. O `build.yml` observa `apps/demo-api/**` e escreve em
+`gitops/**`. Conjuntos disjuntos, laço impossível por construção.
+
+O mesmo raciocínio vale para o `terraform.yml`, que observa `environments/dev/**`
+e `modules/**` — por isso commits do Argo ou do build nunca disparam um apply
+de infraestrutura.
+
+### O Argo CD gerenciando a si mesmo
+
+Alguém precisa instalar o Argo CD antes de o Argo CD poder instalar qualquer
+coisa — o mesmo problema do ovo e da galinha do `bootstrap/` no M1, e a mesma
+forma de resolver: um `helm install` manual, uma única vez.
+
+A diferença é que aqui o bootstrap não fica fora do ciclo para sempre. Uma das
+Applications que o `root` cria é o **próprio Argo CD**
+(`gitops/apps/argocd.yaml`), apontando para o mesmo arquivo de valores que a
+instalação manual usou. A partir da primeira sincronização, reconfigurar o
+Argo CD é editar um arquivo versionado e fazer commit — o `helm upgrade` no
+terminal de alguém deixa de existir como caminho.
+
+Repare numa assimetria deliberada nesse arquivo: `prune: false`, ao contrário
+de todas as outras Applications. Um prune disparado por engano numa Application
+que gerencia o próprio controlador poderia remover o controlador que está
+executando o prune, e não sobraria nada no cluster capaz de se recuperar.
+
+### Decisões menores que valem explicar
+
+- **Tag imutável (`sha-<commit>`), nunca `latest`.** Com tag móvel, "qual
+  código está rodando?" não tem resposta, rollback deixa de ser
+  determinístico, e o Kubernetes sequer detecta que algo mudou — o nome da
+  imagem continua idêntico.
+- **`kustomize edit set image` em vez de `sed`.** O kustomize entende a
+  estrutura do arquivo; um `sed` casa texto e quebra silenciosamente quando a
+  formatação muda.
+- **Imagem distroless.** O binário Go estático cabe numa imagem sem sistema
+  operacional: sem shell e sem gerenciador de pacotes para um invasor usar,
+  pull mais rápido em cada nó novo, e scanner de vulnerabilidade sem ruído de
+  pacotes que a aplicação nunca chamou.
+- **Nó subiu para `Standard_B2ms`.** O Argo CD, mesmo com Dex, ApplicationSet
+  e notificações desligados, não cabe com folga em 4 GB ao lado do kube-system
+  e do agente do Container Insights. É uma **rotação** de pool, não recriação
+  do cluster — o `temporary_name_for_rotation` colocado no módulo do M2 existia
+  exatamente para este momento.
+- **`AcrPush` explícito para o CI.** O Contributor já conseguiria empurrar
+  imagem, porque as permissões do ACR estão em `actions` (cobertas pelo
+  curinga) e não em `dataActions`. Funcionaria por acidente do modelo de roles
+  da Microsoft; declarar a intenção sobrevive ao aperto de escopo do M5.
+- **Sem gate manual no deploy da aplicação.** O gate continua onde importa —
+  mudanças de infraestrutura. Para a aplicação em `dev`, sincronização
+  automática é o ponto do GitOps. Num ambiente de produção real, o padrão
+  seria um repositório ou branch separada exigindo PR aprovado.
+
+### Como rodar
+
+O cluster precisa estar ligado:
+
+```powershell
+az aks start --name azpe-dev-aks --resource-group azpe-dev-rg
+az aks get-credentials --name azpe-dev-aks --resource-group azpe-dev-rg --overwrite-existing
+```
+
+Instale o Argo CD uma única vez e anote a versão do chart:
+
+```powershell
+helm repo add argo https://argoproj.github.io/argo-helm
+helm repo update
+helm search repo argo/argo-cd --versions | Select-Object -First 5
+```
+
+Use a versão que aparecer no comando acima nos dois lugares — no `helm install`
+abaixo e no `targetRevision` de `gitops/apps/argocd.yaml`. Se as duas
+divergirem, a primeira sincronização faz um upgrade inesperado do Argo CD
+enquanto ele mesmo está rodando.
+
+```powershell
+kubectl create namespace argocd
+helm install argocd argo/argo-cd -n argocd `
+  --version <versão> `
+  -f gitops/bootstrap/argocd-values.yaml
+kubectl -n argocd rollout status deploy/argocd-server --timeout=5m
+```
+
+Dê a partida no app-of-apps:
+
+```powershell
+kubectl apply -f gitops/bootstrap/root-app.yaml
+```
+
+Acesse a interface:
+
+```powershell
+kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | %{ [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($_)) }
+kubectl -n argocd port-forward svc/argocd-server 8080:80
+```
+
+Abra `http://localhost:8080`, usuário `admin` e a senha impressa acima.
+
 ## Próximos milestones
 
 | # | Escopo |
 |---|--------|
-| M3 | GitOps com Argo CD + pipeline reutilizável publicando no ACR |
 | M4 | Golden path no Backstage ("criar nova API") |
 | M5 | Guardrails — Crossplane Composition + Azure Policy |
 | M6 | Observabilidade — Azure Monitor + Managed Grafana |

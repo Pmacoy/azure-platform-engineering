@@ -1,0 +1,45 @@
+# O "app-of-apps": a única coisa que você aplica à mão depois de instalar o
+# Argo CD.
+#
+# Ele é uma Application cujo conteúdo é... um diretório cheio de outras
+# Applications (gitops/apps/). A partir daqui, adicionar uma aplicação nova à
+# plataforma é criar um arquivo YAML naquele diretório e fazer commit --
+# ninguém precisa de acesso ao cluster, e não existe `kubectl apply` manual
+# em lugar nenhum do fluxo.
+#
+# É a mesma ideia do bootstrap do M1: alguém tem que dar a primeira partida
+# manualmente, e depois o sistema se sustenta. A diferença é que lá o
+# bootstrap ficava fora do ciclo para sempre; aqui, uma das Applications que
+# este root cria é o próprio Argo CD, então até a primeira partida passa a ser
+# gerenciada por Git a partir do segundo minuto.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root
+  namespace: argocd
+  finalizers:
+    # Sem este finalizer, apagar a Application "root" deixa tudo que ela criou
+    # órfão no cluster. Com ele, o Argo remove os filhos em cascata.
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/Pmacoy/azure-platform-engineering.git
+    targetRevision: main
+    path: gitops/apps
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+
+  syncPolicy:
+    automated:
+      # prune: remove do cluster o que foi removido do Git. Sem isso, apagar
+      # um arquivo não apaga o recurso, e o cluster acumula lixo que ninguém
+      # consegue explicar.
+      prune: true
+      # selfHeal: desfaz mudanças feitas direto no cluster (o `kubectl edit`
+      # de madrugada que ninguém documentou). O Git volta a ser a única
+      # fonte de verdade, por construção e não por disciplina.
+      selfHeal: true

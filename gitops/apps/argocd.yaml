@@ -1,0 +1,60 @@
+# O Argo CD gerenciando a própria instalação.
+#
+# Depois que esta Application sincroniza pela primeira vez, o `helm install`
+# manual que você rodou deixa de ser a fonte de verdade: mudar
+# gitops/bootstrap/argocd-values.yaml e fazer commit passa a ser a forma de
+# reconfigurar o Argo CD. Ligar o ApplicationSet no M4, por exemplo, vira uma
+# linha num arquivo versionado e revisável, não um `helm upgrade` que só
+# existiu no terminal de alguém.
+#
+# Isto usa "multi-source" (Argo CD 2.6+): a primeira source é o chart no
+# repositório Helm, a segunda é ESTE repositório Git, marcado com `ref: values`
+# para que a primeira possa referenciar arquivos dele via $values. Sem isso,
+# os valores teriam que ser copiados inline aqui -- duplicando o arquivo de
+# bootstrap e garantindo que as duas cópias divergissem com o tempo.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: argocd
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  sources:
+    - repoURL: https://argoproj.github.io/argo-helm
+      chart: argo-cd
+      # CONFIRA ESTA VERSÃO antes do primeiro apply. Ela precisa ser
+      # exatamente a mesma que você usou no `helm install` manual, senão a
+      # primeira sincronização vai fazer um upgrade ou downgrade inesperado
+      # do Argo CD enquanto ele mesmo está rodando. Para listar as
+      # disponíveis:
+      #
+      #   helm search repo argo/argo-cd --versions | head
+      targetRevision: 7.8.2
+      helm:
+        valueFiles:
+          - $values/gitops/bootstrap/argocd-values.yaml
+
+    - repoURL: https://github.com/Pmacoy/azure-platform-engineering.git
+      targetRevision: main
+      ref: values
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+
+  syncPolicy:
+    automated:
+      # prune fica DESLIGADO aqui, ao contrário das outras Applications.
+      # Motivo: esta Application gerencia o próprio Argo CD. Um prune
+      # disparado por um erro de configuração poderia remover o controlador
+      # que está executando o prune -- e aí não sobra nada no cluster capaz
+      # de se recuperar sozinho. Autogerenciamento pede essa assimetria.
+      prune: false
+      selfHeal: true
+    syncOptions:
+      # O chart do Argo CD instala CRDs grandes o suficiente para estourar o
+      # limite de anotação do `kubectl apply` tradicional.
+      - ServerSideApply=true

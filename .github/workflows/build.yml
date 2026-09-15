@@ -1,0 +1,92 @@
+name: Build & Publish
+
+on:
+    push:
+        branches: [main]
+        paths:
+            - "apps/demo-api/**"
+            - ".github/workflows/build.yml"
+    workflow_dispatch:
+
+permissions:
+    id-token: write
+    contents: write
+
+concurrency:
+    group: build-demo-api
+    cancel-in-progress: false
+
+env:
+    ACR_NAME: azpedevacr93mi2y
+    IMAGE_NAME: demo-api
+    MANIFEST_DIR: gitops/manifests/demo-api
+
+jobs:
+    build:
+        name: Build, push e atualizar manifesto
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Definir tag da imagem
+              id: meta
+              run: echo "tag=sha-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+            - name: Login no Azure (OIDC)
+              uses: azure/login@v2
+              with:
+                  client-id: ${{ secrets.AZURE_CLIENT_ID }}
+                  tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+                  subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+            - name: Login no ACR
+              run: az acr login --name "$ACR_NAME"
+
+            - name: Build da imagem
+              run: |
+                  docker build \
+                    --build-arg VERSION=${{ steps.meta.outputs.tag }} \
+                    -t "$ACR_NAME.azurecr.io/$IMAGE_NAME:${{ steps.meta.outputs.tag }}" \
+                    apps/demo-api
+
+            - name: Push para o ACR
+              run: docker push "$ACR_NAME.azurecr.io/$IMAGE_NAME:${{ steps.meta.outputs.tag }}"
+
+            - name: Instalar kustomize
+              uses: imranismail/setup-kustomize@v2
+
+            - name: Atualizar tag no manifesto
+              run: |
+                  cd "$MANIFEST_DIR"
+                  kustomize edit set image \
+                    "$IMAGE_NAME=$ACR_NAME.azurecr.io/$IMAGE_NAME:${{ steps.meta.outputs.tag }}"
+
+            - name: Commit da nova tag
+              run: |
+                  git config user.name  "github-actions[bot]"
+                  git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+                  if git diff --quiet -- "$MANIFEST_DIR"; then
+                    echo "Manifesto já aponta para esta tag; nada a commitar."
+                    exit 0
+                  fi
+
+                  git add "$MANIFEST_DIR"
+                  git commit -m "deploy(demo-api): ${{ steps.meta.outputs.tag }}"
+                  git pull --rebase origin main
+                  git push origin HEAD:main
+
+            - name: Resumo
+              if: always()
+              run: |
+                  {
+                    echo "## Build — demo-api"
+                    echo ""
+                    echo "| | |"
+                    echo "|---|---|"
+                    echo "| Imagem | \`$ACR_NAME.azurecr.io/$IMAGE_NAME:${{ steps.meta.outputs.tag }}\` |"
+                    echo "| Commit | \`${{ github.sha }}\` |"
+                    echo ""
+                    echo "O deploy acontece quando o Argo CD sincronizar o commit acima."
+                  } >> "$GITHUB_STEP_SUMMARY"

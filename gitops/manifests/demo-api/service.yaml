@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-api
+  namespace: demo
+spec:
+  # ClusterIP, não LoadBalancer, de propósito: um Service do tipo LoadBalancer
+  # faz o Azure provisionar um IP público e cobrar por ele. Enquanto não
+  # existe um ingress controller (M4), o acesso é por `kubectl port-forward`,
+  # que custa zero.
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: demo-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

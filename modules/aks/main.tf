@@ -134,6 +134,28 @@ resource "azurerm_kubernetes_cluster" "this" {
 # AcrPull.
 # ---------------------------------------------------------------------------
 
+# Permissão de PUSH para a identidade do pipeline.
+#
+# Sutileza que vale entender: a identidade do GitHub Actions já é Contributor
+# na assinatura, e o Contributor tecnicamente consegue empurrar imagem, porque
+# as permissões de push/pull do ACR estão declaradas em `actions` (cobertas
+# pelo curinga do Contributor) e não em `dataActions` (que curinga nenhum
+# alcança). Ou seja: funcionaria por acidente da forma como a Microsoft
+# modelou essa role.
+#
+# Depender disso é frágil -- o dia em que o Contributor for reduzido, ou o
+# escopo apertado no M5, o pipeline quebra sem ninguém entender por quê.
+# Declarar AcrPush explicitamente torna a intenção legível e sobrevive ao
+# aperto de escopo que já está planejado.
+resource "azurerm_role_assignment" "ci_acr_push" {
+  count = var.ci_principal_object_id == null ? 0 : 1
+
+  scope                            = azurerm_container_registry.this.id
+  role_definition_name             = "AcrPush"
+  principal_id                     = var.ci_principal_object_id
+  skip_service_principal_aad_check = true
+}
+
 resource "azurerm_role_assignment" "aks_acr_pull" {
   scope                = azurerm_container_registry.this.id
   role_definition_name = "AcrPull"

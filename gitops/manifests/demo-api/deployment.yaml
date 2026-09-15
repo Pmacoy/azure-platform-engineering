@@ -17,6 +17,22 @@ spec:
     spec:
       securityContext:
         runAsNonRoot: true
+        # O UID PRECISA ser numérico aqui, e isto custou um deploy quebrado.
+        #
+        # `runAsNonRoot: true` é uma promessa que o kubelet tem que VERIFICAR
+        # antes de iniciar o container. Se a imagem declara `USER nonroot`
+        # (um nome), ele precisaria abrir a imagem e resolver esse nome no
+        # /etc/passwd dela para descobrir o UID -- e numa imagem distroless
+        # não há o que resolver. Sem conseguir provar que o usuário não é
+        # root, ele recusa e o pod fica em CreateContainerConfigError, sem
+        # nunca ter tentado rodar a imagem.
+        #
+        # 65532 é o UID do usuário `nonroot` nas imagens distroless do Google.
+        # Declarar o número aqui torna a verificação possível sem o kubelet
+        # precisar inspecionar nada.
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
       containers:

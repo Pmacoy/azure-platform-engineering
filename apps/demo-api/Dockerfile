@@ -37,9 +37,15 @@ FROM gcr.io/distroless/static-debian12:nonroot
 
 COPY --from=build /out/demo-api /demo-api
 
-# Redundante com a tag :nonroot, mas explícito -- quem lê o Dockerfile não
-# deveria precisar saber o que a tag faz por baixo.
-USER nonroot:nonroot
+# NUMÉRICO, não `nonroot:nonroot`. O Kubernetes, quando o manifesto pede
+# `runAsNonRoot: true`, precisa provar que o usuário não é root ANTES de
+# iniciar o container -- e resolver um nome exigiria ler o /etc/passwd de
+# dentro da imagem, que numa distroless não serve para isso. Com o UID
+# explícito, a imagem se descreve sozinha e funciona sob qualquer política
+# de segurança que exija usuário não-root.
+#
+# 65532 é o UID do usuário `nonroot` das imagens distroless.
+USER 65532:65532
 
 EXPOSE 8080
 

@@ -458,11 +458,11 @@ executando o prune, e não sobraria nada no cluster capaz de se recuperar.
   operacional: sem shell e sem gerenciador de pacotes para um invasor usar,
   pull mais rápido em cada nó novo, e scanner de vulnerabilidade sem ruído de
   pacotes que a aplicação nunca chamou.
-- **Nó subiu para `Standard_B2ms`.** O Argo CD, mesmo com Dex, ApplicationSet
-  e notificações desligados, não cabe com folga em 4 GB ao lado do kube-system
-  e do agente do Container Insights. É uma **rotação** de pool, não recriação
-  do cluster — o `temporary_name_for_rotation` colocado no módulo do M2 existia
-  exatamente para este momento.
+- **Nó subiu para `Standard_B2ms`.** O Argo CD, mesmo com Dex e notificações
+  desligados, não cabe com folga em 4 GB ao lado do kube-system e do agente do
+  Container Insights. É uma **rotação** de pool, não recriação do cluster — o
+  `temporary_name_for_rotation` colocado no módulo do M2 existia exatamente
+  para este momento, e o plano do apply confirmou: `~`, não `-/+`.
 - **`AcrPush` explícito para o CI.** O Contributor já conseguiria empurrar
   imagem, porque as permissões do ACR estão em `actions` (cobertas pelo
   curinga) e não em `dataActions`. Funcionaria por acidente do modelo de roles
@@ -471,6 +471,44 @@ executando o prune, e não sobraria nada no cluster capaz de se recuperar.
   mudanças de infraestrutura. Para a aplicação em `dev`, sincronização
   automática é o ponto do GitOps. Num ambiente de produção real, o padrão
   seria um repositório ou branch separada exigindo PR aprovado.
+
+### Três coisas que quebraram, e o que cada uma ensina
+
+**1. `CreateContainerConfigError` no primeiro deploy.** O manifesto pedia
+`runAsNonRoot: true` e o Dockerfile declarava `USER nonroot` — um nome. O
+kubelet precisa *provar* que o usuário não é root antes de iniciar o
+container, e resolver um nome exigiria ler o `/etc/passwd` de dentro da
+imagem, que numa distroless não serve para isso. Sem conseguir verificar, ele
+recusa — sem nunca tentar executar a imagem.
+
+O diagnóstico veio por eliminação: `CreateContainerConfigError` tem três
+causas usuais (ConfigMap ausente, Secret ausente, usuário não verificável), e
+o `describe` mostrava `Environment: <none>` e nenhum volume além do token da
+service account. As duas primeiras estavam descartadas pelo próprio output.
+
+Correção: `runAsUser: 65532` explícito no manifesto (65532 é o UID do
+`nonroot` nas distroless) e `USER 65532:65532` no Dockerfile, para a imagem se
+descrever sozinha.
+
+**2. O Helm ignorou um valor em silêncio.** O arquivo de values pedia
+`applicationSet.enabled: false`, e o controlador subiu mesmo assim. No chart
+10.x aquela seção não tem chave `enabled` — e o Helm aceita qualquer valor
+desconhecido sem avisar. O `dex.enabled` e o `notifications.enabled`
+funcionaram porque aquelas seções têm a chave, o que tornou a falha ainda mais
+fácil de não perceber.
+
+*"Como você sabe que seus valores de Helm surtiram efeito?"* Não pela ausência
+de erro: por `helm get values`, pelo estado real do cluster, ou por charts que
+publiquem `values.schema.json` — aí sim o Helm valida a estrutura.
+
+**3. O `kustomize edit` apagou toda a documentação de um arquivo.** O comando
+não edita texto: ele carrega o YAML, altera a estrutura e reescreve pelo
+próprio serializador, que descarta comentários. O primeiro build apagou o
+bloco que explicava o `kustomization.yaml` — visível no diff do bot como seis
+linhas alteradas para uma mudança de uma tag.
+
+Regra que ficou: **arquivo que uma ferramenta reescreve não é lugar para
+documentação.** A explicação foi para `gitops/manifests/demo-api/README.md`.
 
 ### Como rodar
 
@@ -481,24 +519,16 @@ az aks start --name azpe-dev-aks --resource-group azpe-dev-rg
 az aks get-credentials --name azpe-dev-aks --resource-group azpe-dev-rg --overwrite-existing
 ```
 
-Instale o Argo CD uma única vez e anote a versão do chart:
+Instale o Argo CD uma única vez. A versão fixada aqui é a mesma do
+`targetRevision` em `gitops/apps/argocd.yaml` — **as duas precisam bater**, ou
+a primeira sincronização faz o Argo CD atualizar a si mesmo enquanto está no
+ar. Para ver o que existe hoje: `helm search repo argo/argo-cd --versions`.
 
 ```powershell
 helm repo add argo https://argoproj.github.io/argo-helm
 helm repo update
-helm search repo argo/argo-cd --versions | Select-Object -First 5
-```
-
-Use a versão que aparecer no comando acima nos dois lugares — no `helm install`
-abaixo e no `targetRevision` de `gitops/apps/argocd.yaml`. Se as duas
-divergirem, a primeira sincronização faz um upgrade inesperado do Argo CD
-enquanto ele mesmo está rodando.
-
-```powershell
 kubectl create namespace argocd
-helm install argocd argo/argo-cd -n argocd `
-  --version <versão> `
-  -f gitops/bootstrap/argocd-values.yaml
+helm install argocd argo/argo-cd -n argocd --version 10.9.1 -f gitops/bootstrap/argocd-values.yaml
 kubectl -n argocd rollout status deploy/argocd-server --timeout=5m
 ```
 
@@ -515,7 +545,25 @@ kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.pas
 kubectl -n argocd port-forward svc/argocd-server 8080:80
 ```
 
-Abra `http://localhost:8080`, usuário `admin` e a senha impressa acima.
+Abra `http://localhost:8080`, usuário `admin` e a senha impressa acima. Troque
+a senha em **User Info → Update Password** e só então remova o secret de
+bootstrap:
+
+```powershell
+kubectl -n argocd delete secret argocd-initial-admin-secret
+```
+
+A ordem importa: apagar o secret não altera a senha (ela é um hash no
+`argocd-secret`; o `argocd-initial-admin-secret` é só uma cópia em texto
+claro). Apagar primeiro apenas esconde a credencial que continua valendo.
+
+Para provar que o ciclo inteiro funciona, sem sair do cluster:
+
+```powershell
+kubectl -n demo run curltest --rm -it --image=curlimages/curl --restart=Never -- curl -s http://demo-api.demo.svc.cluster.local
+```
+
+O campo `version` do JSON tem que bater com o SHA do último commit de código.
 
 ## Próximos milestones
 

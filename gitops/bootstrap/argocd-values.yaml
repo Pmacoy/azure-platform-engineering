@@ -23,11 +23,30 @@ dex:
 notifications:
   enabled: false
 
-# ApplicationSet gera Applications a partir de geradores (lista de clusters,
-# diretórios do Git, PRs). Com uma aplicação só, o app-of-apps simples resolve.
-# Este é o componente que o M4 (golden path) provavelmente vai religar.
+# ApplicationSet FICA LIGADO -- e a história de por que vale registrar.
+#
+# A primeira versão deste arquivo tinha `applicationSet.enabled: false`. O
+# Helm aceitou sem reclamar, e o controlador subiu do mesmo jeito. Motivo: no
+# chart 10.x essa seção simplesmente NÃO TEM uma chave `enabled` (o `dex` e o
+# `notifications` têm, por isso aqueles dois obedeceram). O Helm ignora em
+# silêncio qualquer valor que o chart não conheça -- não existe aviso, não
+# existe erro.
+#
+# A lição: ausência de erro não é prova de que um valor surtiu efeito. Para
+# verificar de verdade: `helm get values argocd -n argocd`, comparar com o
+# estado real do cluster, ou usar charts que publiquem values.schema.json
+# (aí o Helm valida a estrutura).
+#
+# Mantido ligado de propósito: o M4 (golden path) precisa exatamente disto --
+# gerar Applications a partir de um template é o que o ApplicationSet faz.
+# Só limitamos o consumo, já que o nó é pequeno.
 applicationSet:
-  enabled: false
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+    limits:
+      memory: 128Mi
 
 configs:
   params:

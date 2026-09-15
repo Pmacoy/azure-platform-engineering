@@ -30,3 +30,17 @@ output "aks_node_resource_group" {
 output "acr_login_server" {
   value = module.aks.acr_login_server
 }
+
+output "key_vault_name" {
+  description = "Nome do Key Vault -- usado no SecretProviderClass e no `az keyvault secret set`."
+  value       = element(split("/", module.landing_zone.key_vault_id), length(split("/", module.landing_zone.key_vault_id)) - 1)
+}
+
+output "backstage_identity_client_id" {
+  description = "Client ID que vai na anotação azure.workload.identity/client-id da ServiceAccount do Backstage."
+  value       = module.backstage_identity.client_id
+}
+
+output "aks_oidc_issuer_url" {
+  value = module.aks.oidc_issuer_url
+}

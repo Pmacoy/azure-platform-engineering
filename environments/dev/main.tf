@@ -52,3 +52,28 @@ module "aks" {
   # Não é segredo -- é um identificador, como o subscription ID.
   ci_principal_object_id = "e93aafd1-ee35-459f-abaf-e9216b3df1c4"
 }
+
+# M4a: identidade que o Backstage vai usar para ler segredos do Key Vault.
+#
+# Criada aqui, no ambiente, e não dentro do módulo aks, de propósito: ela
+# pertence à APLICAÇÃO, não ao cluster. Outro time que instalasse uma
+# aplicação diferente no mesmo cluster criaria a sua própria, com acesso
+# só ao que ela precisa -- em vez de todos compartilharem uma identidade
+# ampla do cluster inteiro.
+#
+# O namespace e o nome da service account abaixo precisam bater EXATAMENTE
+# com os do manifesto que o Argo vai aplicar. É o mesmo tipo de string
+# exata que derrubou o M1 duas vezes.
+module "backstage_identity" {
+  source = "../../modules/workload-identity"
+
+  name                = "${local.prefix}-backstage"
+  resource_group_name = module.landing_zone.resource_group_name
+  location            = var.location
+  key_vault_id        = module.landing_zone.key_vault_id
+  oidc_issuer_url     = module.aks.oidc_issuer_url
+  tags                = local.tags
+
+  namespace            = "backstage"
+  service_account_name = "backstage"
+}

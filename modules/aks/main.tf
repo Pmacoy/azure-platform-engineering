@@ -79,6 +79,32 @@ resource "azurerm_kubernetes_cluster" "this" {
     type = "SystemAssigned"
   }
 
+  # WORKLOAD IDENTITY (M4) -- o mesmo mecanismo do M1, um andar abaixo.
+  #
+  # No M1, o GitHub emitia um token OIDC dizendo "sou a execução X do
+  # repositório Y", e o Azure AD trocava por um access token. Aqui o
+  # EMISSOR passa a ser o próprio cluster: ele assina um token dizendo "sou
+  # a service account tal, do namespace tal", e o Azure AD troca pelo
+  # mesmo tipo de access token.
+  #
+  # `oidc_issuer_enabled` liga o emissor (publica as chaves públicas num
+  # endpoint que o Azure AD consegue consultar). `workload_identity_enabled`
+  # liga o webhook que injeta o token projetado nos pods que pedirem.
+  #
+  # O resultado é que um pod consegue ler um segredo do Key Vault sem que
+  # exista senha nenhuma em lugar nenhum -- nem em YAML, nem no Git, nem
+  # num Secret do Kubernetes.
+  oidc_issuer_enabled       = true
+  workload_identity_enabled = true
+
+  # Addon que monta segredos do Key Vault como arquivos dentro do pod.
+  # A rotação relê o Key Vault periodicamente: sem ela, trocar um segredo
+  # no cofre não teria efeito até o pod ser recriado.
+  key_vault_secrets_provider {
+    secret_rotation_enabled  = true
+    secret_rotation_interval = "5m"
+  }
+
   network_profile {
     network_plugin = "azure"
 

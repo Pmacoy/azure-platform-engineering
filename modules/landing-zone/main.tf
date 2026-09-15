@@ -36,6 +36,19 @@ resource "azurerm_subnet" "private" {
   resource_group_name  = azurerm_resource_group.this.name
   virtual_network_name = azurerm_virtual_network.this.name
   address_prefixes     = [var.private_subnet_prefix]
+
+  # Service endpoint para Key Vault (M4).
+  #
+  # Sem isto, o tráfego desta sub-rede sai para o Key Vault pela internet,
+  # com o IP público de saída do cluster -- um IP que o AKS gerencia e que
+  # pode mudar. Liberar aquele IP no firewall do Key Vault seria uma regra
+  # que quebra sozinha algum dia.
+  #
+  # Com o service endpoint, o tráfego passa a sair pela espinha dorsal da
+  # Azure com a IDENTIDADE DA SUB-REDE, e o Key Vault pode confiar na
+  # sub-rede em vez de num endereço. A regra passa a descrever quem está
+  # falando, não de onde.
+  service_endpoints = ["Microsoft.KeyVault"]
 }
 
 # A sub-rede pública só aceita HTTPS de entrada. Tudo o mais fica de fora
@@ -141,14 +154,22 @@ resource "azurerm_key_vault" "this" {
   soft_delete_retention_days = 7
   enable_rbac_authorization  = true
 
-  # "Deny" por padrão com bypass para serviços Azure -- o pipeline de CI
-  # (fora da rede do Azure) não consegue falar com o plano de dados deste
-  # Key Vault até a Fase 06 conectar uma rota explícita. Isso é intencional
-  # agora; vira um problema real a resolver quando M5/M6 precisarem
-  # escrever segredos por automação, não um bug a corrigir hoje.
+  # "Deny" por padrão: nada alcança o plano de dados deste Key Vault a não
+  # ser o que estiver explicitamente liberado abaixo.
+  #
+  # A sub-rede privada entra na lista (M4) porque é lá que os pods rodam, e
+  # o driver CSI precisa ler segredos daqui. Repare que a liberação é por
+  # SUB-REDE, não por IP: quem autoriza é a identidade de rede, que não muda
+  # quando o IP público de saída do cluster mudar.
+  #
+  # O pipeline de CI continua de fora de propósito. Ele roda em runners da
+  # GitHub, fora da rede do Azure, e não tem motivo para ler segredo nenhum
+  # -- ele provisiona o Key Vault (plano de controle, via ARM), não consome
+  # o conteúdo dele.
   network_acls {
-    default_action = "Deny"
-    bypass         = "AzureServices"
+    default_action             = "Deny"
+    bypass                     = "AzureServices"
+    virtual_network_subnet_ids = [azurerm_subnet.private.id]
   }
 
   tags = var.tags

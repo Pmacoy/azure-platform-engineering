@@ -1,0 +1,81 @@
+# Verificação do M4a: um pod lê um segredo do Key Vault sem senha nenhuma.
+#
+# NÃO é sincronizado pelo Argo CD -- nada em gitops/verify/ é. Aplique à
+# mão, confira, apague. Veja o README ao lado para os comandos que
+# substituem os marcadores abaixo pelos valores reais.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: backstage
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: backstage
+  namespace: backstage
+  annotations:
+    # Diz ao webhook de workload identity QUAL identidade do Azure este
+    # pod quer assumir. Sem esta anotação o token é emitido, mas não
+    # corresponde a identidade nenhuma do lado do Azure AD.
+    azure.workload.identity/client-id: "REPLACE_CLIENT_ID"
+---
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: backstage-kv
+  namespace: backstage
+spec:
+  provider: azure
+  parameters:
+    # As duas formas ANTIGAS de identidade, explicitamente desligadas.
+    # "pod identity" foi depreciada; "VM managed identity" usaria a
+    # identidade do NÓ -- ou seja, qualquer pod naquele nó teria o mesmo
+    # acesso. Workload identity é por service account, que é o ponto.
+    usePodIdentity: "false"
+    useVMManagedIdentity: "false"
+    clientID: "REPLACE_CLIENT_ID"
+    keyvaultName: "REPLACE_KEYVAULT_NAME"
+    tenantId: "57bac512-f8eb-4828-9e22-098ddc0d77bd"
+    objects: |
+      array:
+        - |
+          objectName: github-token
+          objectType: secret
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kv-test
+  namespace: backstage
+  labels:
+    # Sem este label o webhook não injeta o token projetado no pod, e a
+    # autenticação falha mesmo com tudo o resto correto.
+    azure.workload.identity/use: "true"
+spec:
+  serviceAccountName: backstage
+  restartPolicy: Never
+  containers:
+    - name: test
+      image: mcr.microsoft.com/azure-cli:latest
+      command: ["/bin/sh", "-c"]
+      # Não imprime o segredo: só o tamanho em bytes. Provar que a leitura
+      # funcionou não exige expor o conteúdo no log do pod.
+      args:
+        - |
+          echo "--- segredo montado como arquivo ---"
+          ls -la /mnt/secrets/
+          echo "bytes lidos: $(wc -c < /mnt/secrets/github-token)"
+          echo "OK: o pod leu o Key Vault sem nenhuma senha no cluster."
+          sleep 30
+      volumeMounts:
+        - name: secrets
+          mountPath: /mnt/secrets
+          readOnly: true
+  volumes:
+    - name: secrets
+      csi:
+        driver: secrets-store.csi.k8s.io
+        readOnly: true
+        volumeAttributes:
+          secretProviderClass: backstage-kv

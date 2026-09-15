@@ -23,6 +23,11 @@ output "acr_login_server" {
   value       = azurerm_container_registry.this.login_server
 }
 
+output "oidc_issuer_url" {
+  description = "URL do emissor OIDC do cluster -- é nela que o Azure AD confia para validar tokens de service accounts (workload identity)."
+  value       = azurerm_kubernetes_cluster.this.oidc_issuer_url
+}
+
 # Deliberadamente NÃO exportamos kube_config nem kube_admin_config. Eles
 # contêm credencial de acesso total ao cluster; exportar como output faz
 # esse segredo aparecer em `terraform output` e no resumo de qualquer

@@ -25,14 +25,13 @@ spec:
   sources:
     - repoURL: https://argoproj.github.io/argo-helm
       chart: argo-cd
-      # CONFIRA ESTA VERSÃO antes do primeiro apply. Ela precisa ser
-      # exatamente a mesma que você usou no `helm install` manual, senão a
-      # primeira sincronização vai fazer um upgrade ou downgrade inesperado
-      # do Argo CD enquanto ele mesmo está rodando. Para listar as
-      # disponíveis:
+      # Esta versão precisa ser exatamente a mesma usada no `helm install`
+      # manual do bootstrap. Se divergirem, a primeira sincronização faz o
+      # Argo CD atualizar (ou reverter) a si mesmo enquanto está no ar.
       #
-      #   helm search repo argo/argo-cd --versions | head
-      targetRevision: 7.8.2
+      # Chart 10.9.1 = Argo CD v3.5.3. Para conferir o que existe hoje:
+      #   helm search repo argo/argo-cd --versions
+      targetRevision: 10.9.1
       helm:
         valueFiles:
           - $values/gitops/bootstrap/argocd-values.yaml
